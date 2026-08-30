@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# gwsa — run the Google Workspace CLI (gws) against a named account profile.
+#
+# Profiles are per-account config directories under ~/.config/gws-accounts/,
+# selected via GOOGLE_WORKSPACE_CLI_CONFIG_DIR. The file keyring backend is
+# used so profiles stay portable across machines (the AES key lives inside
+# each profile dir instead of the OS keyring).
+#
+# Usage:
+#   gwsa list                          # show profiles and their auth state
+#   gwsa <profile> <gws args...>       # run any gws command as that account
+#
+# Examples:
+#   gwsa work auth login --scopes "<see SKILL.md for the full scope list>"
+#   gwsa work gmail +send --to a@b.com --from alias@corp.com \
+#        --subject 'Hi' --body 'Hello'
+#   gwsa personal drive files list --params '{"pageSize": 5}'
+set -euo pipefail
+
+ROOT="${GWSA_ROOT:-$HOME/.config/gws-accounts}"
+
+usage() {
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+  if [[ -d "$ROOT" ]]; then
+    echo
+    echo "Profiles in $ROOT:"
+    for d in "$ROOT"/*/; do
+      [[ -d "$d" ]] && echo "  - $(basename "$d")"
+    done
+  fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  ""|-h|--help|help)
+    usage
+    exit 0
+    ;;
+  list)
+    printf '%-12s %-10s %-12s %s\n' "PROFILE" "AUTH" "CREDENTIALS" "CLIENT_SECRET"
+    for d in "$ROOT"/*/; do
+      [[ -d "$d" ]] || continue
+      name="$(basename "$d")"
+      json="$(GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$d" \
+              GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND="${GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND:-file}" \
+              gws auth status 2>/dev/null || true)"
+      if command -v jq >/dev/null 2>&1 && [[ -n "$json" ]]; then
+        method="$(jq -r '.auth_method // "?"' <<<"$json")"
+        creds="$(jq -r 'if .encrypted_credentials_exists or .plain_credentials_exists then "yes" else "no" end' <<<"$json")"
+        secret="$(jq -r 'if .client_config_exists then "yes" else "missing" end' <<<"$json")"
+        printf '%-12s %-10s %-12s %s\n' "$name" "$method" "$creds" "$secret"
+      else
+        printf '%-12s %s\n' "$name" "${json:-status unavailable}"
+      fi
+    done
+    exit 0
+    ;;
+esac
+
+profile="$cmd"
+shift
+dir="$ROOT/$profile"
+if [[ ! -d "$dir" ]]; then
+  echo "gwsa: unknown profile '$profile'" >&2
+  echo "Available profiles:" >&2
+  for d in "$ROOT"/*/; do [[ -d "$d" ]] && echo "  - $(basename "$d")" >&2; done
+  exit 3
+fi
+
+export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$dir"
+# 'file' keeps the encryption key inside the profile dir => portable across machines.
+export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND="${GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND:-file}"
+
+exec gws "$@"
