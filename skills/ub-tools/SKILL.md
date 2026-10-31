@@ -17,6 +17,13 @@ description: Use when a crapper, dryer or mutator command is needed (the ub-mode
 
 ## Use
 
+**In a pnpm project, never trust crapper's own coverage run.** crapper installs `@vitest/coverage-v8` with npm, which fails in a pnpm tree; it only warns and scores every function at 0% coverage. Write the report first with `scripts/pnpm-coverage.sh` (arguments go to `vitest run`; it restores `package.json` and the lockfile), then pass `--use-existing-coverage`:
+
+```bash
+scripts/pnpm-coverage.sh --project unit --coverage.include='lib/apps/**'
+crapper --use-existing-coverage lib/apps
+```
+
 ```bash
 crapper --changed                 # CRAP per function in git additions and edits (runs coverage)
 crapper --no-coverage <path>      # complexity only, no test run
@@ -27,4 +34,4 @@ mutator <file>                    # run the mutants for one file; start small
 
 - CRAP is never below cyclomatic complexity, so a function at CC 10 fails a "CRAP < 10" rule even at full coverage: split it.
 - mutator rewrites source files while it runs: use it in a worktree another agent does not share.
-- The first coverage run of a Vitest project installs `@vitest/coverage-v8` into `node_modules` without editing `package.json`.
+- In an npm project, the first coverage run installs `@vitest/coverage-v8` into `node_modules` without editing `package.json`.
