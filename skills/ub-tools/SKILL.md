@@ -17,12 +17,10 @@ description: Use when a crapper, dryer or mutator command is needed (the ub-mode
 
 ## Use
 
-**In a pnpm project, never trust crapper's own coverage run.** crapper installs `@vitest/coverage-v8` with npm, which fails in a pnpm tree; it only warns and scores every function at 0% coverage. Write the report first with `scripts/pnpm-coverage.sh` (arguments go to `vitest run`; it restores `package.json` and the lockfile), then pass `--use-existing-coverage`:
+**Make the repository measurable once, instead of wrapping every run.** Check these two before trusting a score:
 
-```bash
-scripts/pnpm-coverage.sh --project unit --coverage.include='lib/apps/**'
-crapper --use-existing-coverage lib/apps
-```
+1. **Coverage in a pnpm (or yarn) project.** When `@vitest/coverage-v8` is missing, crapper installs it with npm. That fails in a pnpm tree, and crapper then only warns and scores every function at 0%. Fix: add `@vitest/coverage-v8` as a devDependency at Vitest's exact version, plus a `coverage` script that writes LCOV (`vitest run --coverage.enabled --coverage.provider=v8 --coverage.reporter=lcov --coverage.reportsDirectory=coverage`, scoped to the unit tests). crapper runs a `coverage` script as-is and skips its install when the package is present. Reference: scenario-labs/scenario-mcp#622.
+2. **mutator and a path alias.** mutator tests each mutant from an overlay of symlinks. An alias resolved from the config file's real path (`'@': import.meta.dirname` in Vitest) loads the original file, so every mutant survives. **0 killed means this, not weak tests.** Fix: resolve the alias from the working directory (`'@': process.cwd()`), which is Vitest's default root anyway. Where the config cannot change, `scripts/mutator-in-place.sh` is the fallback (see below).
 
 ```bash
 crapper --changed                 # CRAP per function in git additions and edits (runs coverage)
@@ -33,12 +31,11 @@ mutator <file>                    # run the mutants for one file; start small
 ```
 
 - CRAP is never below cyclomatic complexity, so a function at CC 10 fails a "CRAP < 10" rule even at full coverage: split it.
-- **mutator through a path alias (`@/…` in Vite/Vitest, tsconfig `paths`) reports every mutant as surviving.** It mutates a copy in a worker overlay and symlinks the rest; the alias resolves to the real tree, so the tests load the original file. A run where nothing is killed means this, not weak tests. Run each mutant in the checkout instead, one at a time:
+- Fallback for an alias you cannot change: run each mutant in the checkout, one at a time. `scripts/mutator-in-place.sh` copies the mutant over the checkout, runs the command from the project root, and restores the file:
 
   ```bash
   mutator --use-existing-coverage --max-workers 1 \
     --test-command "$HOME/.claude/skills/ub-tools/scripts/mutator-in-place.sh $PWD ./node_modules/.bin/vitest run <test file>" <file>
   ```
-
-  `scripts/mutator-in-place.sh` copies the mutant over the checkout, runs the command from the project root and restores the file. Use it in a worktree another agent does not share.
+- mutator rewrites files while it runs: use it in a worktree another agent does not share.
 - In an npm project, the first coverage run installs `@vitest/coverage-v8` into `node_modules` without editing `package.json`.
