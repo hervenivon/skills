@@ -33,5 +33,12 @@ mutator <file>                    # run the mutants for one file; start small
 ```
 
 - CRAP is never below cyclomatic complexity, so a function at CC 10 fails a "CRAP < 10" rule even at full coverage: split it.
-- mutator rewrites source files while it runs: use it in a worktree another agent does not share.
+- **mutator through a path alias (`@/…` in Vite/Vitest, tsconfig `paths`) reports every mutant as surviving.** It mutates a copy in a worker overlay and symlinks the rest; the alias resolves to the real tree, so the tests load the original file. A run where nothing is killed means this, not weak tests. Run each mutant in the checkout instead, one at a time:
+
+  ```bash
+  mutator --use-existing-coverage --max-workers 1 \
+    --test-command "$HOME/.claude/skills/ub-tools/scripts/mutator-in-place.sh $PWD ./node_modules/.bin/vitest run <test file>" <file>
+  ```
+
+  `scripts/mutator-in-place.sh` copies the mutant over the checkout, runs the command from the project root and restores the file. Use it in a worktree another agent does not share.
 - In an npm project, the first coverage run installs `@vitest/coverage-v8` into `node_modules` without editing `package.json`.
