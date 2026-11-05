@@ -59,6 +59,7 @@ Profiles use `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` (set by `gwsa`), so cre
 
 | Symptom | Fix |
 |---|---|
+| `command not found: gwsa` (zsh may offer to correct it to `gws`) | `~/.local/bin` is missing from the PATH of *new* shells. Add a guarded `export PATH="$HOME/.local/bin:$PATH"` to your shell rc, then `rehash` in already-open shells. Note that bootstrap's PATH warning can give a FALSE NEGATIVE: it only inspects the PATH of the process running it, which may have inherited the dir from its parent. Check the way a fresh terminal sees it: `env -i HOME=$HOME TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin zsh -ic 'command -v gwsa'` (keep `/usr/bin` in that baseline or nvm/conda init breaks on a missing `tr`/`dirname` and misreports `gws` as absent) |
 | `access_denied` at login | Add that email under OAuth consent screen → Test users |
 | `Error 400: invalid_request` / `Required parameter is missing: response_type` at login | The auth URL was line-wrapped by the terminal and the click lost its query params — copy the FULL printed URL into the browser instead |
 | `403 Request had insufficient authentication scopes` | The stored token misses a scope (e.g. `gmail.settings.basic` for filters/rules) — re-run `auth login` with the full `--scopes` list above |
