@@ -51,11 +51,17 @@ elif [[ $# -gt 0 ]]; then
   exit 3
 fi
 
-# 2. Install. --native-tls trusts the system certificate store, so a TLS-intercepting
-#    proxy that works for git and curl also works for uv.
-uv tool install --native-tls "$(spec_of crapper)"
-uv tool install --native-tls "$(spec_of dryer)"
-uv tool install --native-tls --with "$(spec_of crapper)" "$(spec_of mutator)"
+# 2. Install. Trusting the system certificate store lets a TLS-intercepting proxy that works
+#    for git and curl also work for uv. uv renamed --native-tls to --system-certs; an older
+#    uv rejects the new name, so pick whichever this uv accepts.
+if uv tool install --help | grep -q -- '--system-certs'; then
+  CERTS_FLAG=--system-certs
+else
+  CERTS_FLAG=--native-tls
+fi
+uv tool install "$CERTS_FLAG" "$(spec_of crapper)"
+uv tool install "$CERTS_FLAG" "$(spec_of dryer)"
+uv tool install "$CERTS_FLAG" --with "$(spec_of crapper)" "$(spec_of mutator)"
 
 # 3. Verify each command runs
 BIN_DIR="$(uv tool dir --bin)"
