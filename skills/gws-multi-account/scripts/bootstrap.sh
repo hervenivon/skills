@@ -93,6 +93,8 @@ done
 mkdir -p "$BIN_DIR"
 install -m 0755 "$SCRIPT_DIR/gwsa" "$BIN_DIR/gwsa"
 echo "==> installed: $BIN_DIR/gwsa"
+install -m 0755 "$SCRIPT_DIR/gwsa-gmail-guard.py" "$BIN_DIR/gwsa-gmail-guard.py"
+echo "==> installed: $BIN_DIR/gwsa-gmail-guard.py (Gmail draft guard, called by gwsa)"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) echo "WARNING: $BIN_DIR is not on your PATH — add it in your shell profile." ;;

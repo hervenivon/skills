@@ -37,6 +37,17 @@ gwsa <profile> schema gmail.users.settings.filters.create  # discover any API pa
 
 Use `+helper` commands (they handle MIME, base64, threading); drop to raw `service resource method --params/--json` only when no helper fits. Every helper takes `--help` and `--dry-run`.
 
+## Gmail drafts: the guard
+
+`gwsa` routes every `gmail` command through `scripts/gwsa-gmail-guard.py` (installed next to the wrapper by `bootstrap.sh`). It fixes 2 problems of drafts made by `+send`, `+reply`, `+reply-all` and `+forward` with `--draft`, which only show up once the draft is sent from the Gmail UI:
+
+| Problem when the draft is sent from Gmail | What the guard does | Opt out for 1 call |
+|---|---|---|
+| A text/plain draft is hard-wrapped at about 70 characters and the quote becomes `>` lines | Body converted to HTML (escaped, 1 `<div>` per line, URLs linked) and `--html` added; also when `--html` is given with a multi-line body that holds no tag | `GWSA_ALLOW_PLAIN=1` |
+| With `-a/--attach`, all attachments leave with the same empty `Content-ID: <>`; Outlook shows only the first file, Apple Mail shows 1 file twice | Each attachment gets its own `f_<10 hex>` id; the fixed message becomes a new draft in the same thread, is read back and checked, the first draft is deleted. stderr: `given unique Content-IDs` | `GWSA_KEEP_ATTACHMENT_IDS=1` |
+
+Write draft bodies as HTML (`--html`, fragment tags such as `<p>`, `<div>`, `<a href>`). If stderr says `attachment-id fix failed`, the first draft was kept with the empty ids: create it again. Direct sends (no `--draft`) pass through unchanged. Tests: `python3 -m unittest discover -s skills/gws-multi-account/scripts -p 'test_*.py'` (offline, uses a fake `gws`).
+
 ## Auth & new accounts
 
 ```bash
@@ -61,6 +72,8 @@ Profiles use `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` (set by `gwsa`), so cre
 |---|---|
 | `command not found: gwsa` (zsh may offer to correct it to `gws`) | `~/.local/bin` is missing from the PATH of *new* shells. Add a guarded `export PATH="$HOME/.local/bin:$PATH"` to your shell rc, then `rehash` in already-open shells. Note that bootstrap's PATH warning can give a FALSE NEGATIVE: it only inspects the PATH of the process running it, which may have inherited the dir from its parent. Check the way a fresh terminal sees it: `env -i HOME=$HOME TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin zsh -ic 'command -v gwsa'` (keep `/usr/bin` in that baseline or nvm/conda init breaks on a missing `tr`/`dirname` and misreports `gws` as absent) |
 | `access_denied` at login | Add that email under OAuth consent screen → Test users |
+| Recipient sees broken lines (~70 characters) and a `>` quote in a mail sent from a gwsa draft | The draft was text/plain only. Check `~/.local/bin/gwsa-gmail-guard.py` exists (re-run `bootstrap.sh`) and write bodies with `--html` |
+| Recipient sees 1 attachment out of 2, or the same file twice | Attachments shared an empty `Content-ID: <>`. Same check as above; the guard prints `given unique Content-IDs` when it fixed a draft |
 | `Error 400: invalid_request` / `Required parameter is missing: response_type` at login | The auth URL was line-wrapped by the terminal and the click lost its query params — copy the FULL printed URL into the browser instead |
 | `403 Request had insufficient authentication scopes` | The stored token misses a scope (e.g. `gmail.settings.basic` for filters/rules) — re-run `auth login` with the full `--scopes` list above |
 | Scope/consent error at login | Trim the `--scopes` list (unverified apps are capped at ~25 scopes) |

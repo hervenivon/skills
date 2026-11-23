@@ -71,4 +71,15 @@ export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$dir"
 # 'file' keeps the encryption key inside the profile dir => portable across machines.
 export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND="${GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND:-file}"
 
+# Gmail guard: every `gmail` command goes through gwsa-gmail-guard.py (installed next to this
+# wrapper), which fixes 2 problems of helper drafts before or after running gws:
+#  - plain-text drafts are hard-wrapped at ~70 characters when sent from the Gmail UI: their body is
+#    converted to HTML (opt out for 1 call: GWSA_ALLOW_PLAIN=1);
+#  - attachments of a draft leave with the same empty Content-ID, so Outlook / Apple Mail show 1 file:
+#    each attachment gets its own id (opt out for 1 call: GWSA_KEEP_ATTACHMENT_IDS=1).
+guard="$(dirname "$0")/gwsa-gmail-guard.py"
+if [[ "${1:-}" == "gmail" && -f "$guard" ]] && command -v python3 >/dev/null 2>&1; then
+  exec python3 "$guard" "$@"
+fi
+
 exec gws "$@"
