@@ -2,17 +2,18 @@
 """gwsa Gmail guard: called by `gwsa` for every `gmail` command, after the profile is selected.
 
 It fixes 2 problems of the drafts that the gws Gmail helpers (`+send`, `+reply`, `+reply-all`,
-`+forward` with `--draft`) create, then hands over to `gws`.
+`+forward` with `--draft`) create, then hands over to `gws`. Python 3.7+, standard library only.
 
 1. Plain-text drafts get hard-wrapped.
    A draft that holds only text/plain opens in Gmail's plain-text compose mode. When it is sent
    from the Gmail UI, Gmail hard-wraps every line at about 70 characters and sends text/plain only:
    the recipient sees broken lines and a `>` quote block. An HTML draft keeps its lines intact.
    - helper `--draft` without `--html`: the `--body` text becomes HTML (escaped, 1 <div> per line,
-     URLs as links) and `--html` is added. A body that already holds HTML tags is taken as HTML
-     written without the flag: it is kept as is and `--html` is added;
-   - helper `--draft` with `--html` but a multi-line body without any HTML tag: same conversion
-     (otherwise the line breaks collapse into 1 paragraph);
+     URLs as links) and `--html` is added. A body that holds real HTML (a closed tag pair such as
+     <p>..</p>, or <br>, <hr>, <img ...>) is taken as HTML written without the flag: it is kept as
+     is and `--html` is added. A text that only names a tag ("use the <b> tag") is escaped;
+   - helper `--draft` with `--html` but a multi-line body without any markup (no tag, comment or
+     entity): same conversion (otherwise the line breaks collapse into 1 paragraph);
    - `users drafts create|update` with a raw message that has no text/html part: a warning.
    Opt out for 1 call: GWSA_ALLOW_PLAIN=1.
 
@@ -21,13 +22,16 @@ It fixes 2 problems of the drafts that the gws Gmail helpers (`+send`, `+reply`,
    Gmail UI, every attachment leaves with an empty `X-Attachment-Id:` and the same empty
    `Content-ID: <>`. Clients that key attachments on Content-ID merge them: Outlook shows only the
    first file, Apple Mail shows 1 file twice. Gmail web gives each attachment its own id.
-   So after gws creates a helper draft with `-a/--attach`, the guard gives each attachment a unique
-   `f_<10 hex>` id (X-Attachment-Id + matching Content-ID), uploads the fixed message as a new draft
-   in the same thread, reads it back (thread, headers, parts, bytes, ids), deletes the first draft
-   and prints the new draft JSON (a requested `--format table|yaml|csv` is run as JSON). If a check
-   fails, the new draft is deleted and the first one kept; every draft id left behind by a failed
-   cleanup is printed. Drafts are re-created rather than updated: `drafts update` on a reply drops
-   it from its thread. Opt out for 1 call: GWSA_KEEP_ATTACHMENT_IDS=1.
+   So after gws creates a helper draft that holds files (`-a/--attach` in any form, or a `+forward`
+   that keeps the original's files, the gws default), the guard gives each attachment without a
+   Content-ID a unique `f_<10 hex>` id (X-Attachment-Id + matching Content-ID), uploads the fixed
+   message as a new draft, reads it back (thread for a reply, headers, parts, bytes, ids), deletes
+   the first draft and prints the new draft JSON (a requested `--format table|yaml|csv` is run as
+   JSON). Files that already have a Content-ID (from a forwarded Outlook mail) and the mail inside
+   an attached .eml are left alone. If a check fails, the new draft is deleted and the first one
+   kept; every draft id left behind by a failed cleanup is printed. Drafts are re-created rather
+   than updated: `drafts update` on a reply drops it from its thread.
+   Opt out for 1 call: GWSA_KEEP_ATTACHMENT_IDS=1.
 
 Direct sends (no `--draft`) pass through unchanged; `--dry-run` gets the HTML step only. If the
 HTML step fails, gws runs with the original arguments; if the attachment step fails, the draft
@@ -43,10 +47,21 @@ import secrets
 import subprocess
 import sys
 import tempfile
+from email.policy import compat32
 
 HELPERS = {"+send", "+reply", "+reply-all", "+forward"}
-ATTACH_FLAGS = ("-a", "--attach")
-TAG = re.compile(r"<(p|div|br|a|b|i|u|strong|em|ul|ol|li|table|span|blockquote|h[1-6]|img|hr)(\s[^>]*)?/?>", re.I)
+# How the guard writes a message back: long headers stay on 1 line and lines end in CRLF, so every
+# header gws wrote comes back as it was (the default policy re-folds lines over 78 characters).
+GEN = compat32.clone(max_line_length=None, linesep="\r\n")
+# Without --html, a body is taken as HTML written without the flag only when it holds a closed tag
+# pair or a line break, rule or image tag; a plain text that merely names a tag is escaped.
+HTML_TAGS = (r"p|div|span|a|b|i|u|s|strong|em|font|center|sup|sub|small|big|ul|ol|li|dl|dt|dd|table|thead"
+             r"|tbody|tfoot|tr|td|th|blockquote|pre|code|h[1-6]|html|head|body|section|article|style")
+OPEN_TAG = re.compile(r"<(%s)(?:\s[^<>]*)?>" % HTML_TAGS, re.I)
+CLOSE_TAG = re.compile(r"</(%s)\s*>" % HTML_TAGS, re.I)
+VOID_TAG = re.compile(r"<(br|hr)\s*/?>|<img\s[^<>]*>", re.I)
+# With --html, any tag, comment or character reference means the body is HTML as written.
+ANY_MARKUP = re.compile(r"</?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?/?>|<!--|&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);")
 URL = re.compile(r"https?://[^\s<>\"']+")
 
 
@@ -78,6 +93,13 @@ def to_html(text):
     return "\n".join(divs)
 
 
+def looks_like_html(body):
+    """A tag both opened and closed somewhere in the body, or a <br>, <hr> or <img ...> tag."""
+    opened = {m.group(1).lower() for m in OPEN_TAG.finditer(body)}
+    closed = {m.group(1).lower() for m in CLOSE_TAG.finditer(body)}
+    return bool(opened & closed) or bool(VOID_TAG.search(body))
+
+
 def body_index(argv):
     """Return (index of the body value, True if it is the `--body=value` form)."""
     for i, a in enumerate(argv):
@@ -97,18 +119,23 @@ def guard_helper(argv):
     body = None
     if i is not None:
         body = argv[i][len("--body="):] if joined else argv[i]
-    if "--html" in argv:
-        if body is not None and "\n" in body.strip() and not TAG.search(body):
-            new = to_html(body)
-            argv[i] = ("--body=" + new) if joined else new
-            sys.stderr.write("gwsa: --html body had no HTML tag, line breaks converted to <div> lines\n")
-        return argv
-    if body is not None and not TAG.search(body):
-        new = to_html(body)
+
+    def set_body(new):
         argv[i] = ("--body=" + new) if joined else new
+
+    if "--html" in argv:
+        if body is not None and "\n" in body.strip() and not ANY_MARKUP.search(body):
+            set_body(to_html(body))
+            sys.stderr.write("gwsa: --html body had no HTML markup, line breaks converted to <div> lines\n")
+        return argv
+    if body is not None and looks_like_html(body):
+        sys.stderr.write("gwsa: draft body holds HTML tags but no --html: sent as HTML (--html added)\n")
+    else:
+        if body is not None:
+            set_body(to_html(body))
+        sys.stderr.write("gwsa: plain draft converted to HTML (Gmail hard-wraps text/plain drafts at send). "
+                         "Write bodies as HTML with --html.\n")
     argv.append("--html")
-    sys.stderr.write("gwsa: plain draft converted to HTML (Gmail hard-wraps text/plain drafts at send). "
-                     "Write bodies as HTML with --html.\n")
     return argv
 
 
@@ -134,10 +161,9 @@ def warn_raw(argv):
     raw = raw_from_args(argv)
     if not raw:
         return
-    msg = email.message_from_bytes(raw)
     has_html = has_text = False
-    for part in msg.walk():
-        if part.is_multipart() or part.get_filename():
+    for part in leaf_parts(email.message_from_bytes(raw)):
+        if part.get_filename() or part.get_content_disposition() == "attachment":
             continue
         if part.get_content_type() == "text/html":
             has_html = True
@@ -150,8 +176,13 @@ def warn_raw(argv):
 
 # ---------- 2. Attachment ids ----------
 
-def has_attachments(argv):
-    return any(a in ATTACH_FLAGS or a.startswith("--attach=") for a in argv)
+def adds_attachments(argv):
+    """True when the helper draft will hold files: -a/--attach in any form clap accepts (-a f, -a=f,
+    -af, --attach f, --attach=f), or a +forward that keeps the original's files (the gws default)."""
+    if argv[1] == "+forward" and "--no-original-attachments" not in argv:
+        return True
+    return any(a == "--attach" or a.startswith("--attach=") or (a.startswith("-a") and not a.startswith("--"))
+               for a in argv)
 
 
 def force_json(argv):
@@ -170,19 +201,48 @@ def force_json(argv):
 
 
 def leaf_parts(msg):
-    return [p for p in msg.walk() if not p.is_multipart()]
+    """The leaf parts of a message, in order. Only multipart/* is entered: a message/* part (an
+    attached .eml) is 1 attachment, and the mail inside it is left alone."""
+    payload = msg.get_payload()
+    if msg.get_content_maintype() == "multipart" and isinstance(payload, list):
+        return [leaf for sub in payload for leaf in leaf_parts(sub)]
+    return [msg]
+
+
+def parse(raw):
+    """Parse a raw message. `email` parses the body of every message/* part as a mail, even when it is
+    base64 (gws sends an attached .eml as message/rfc822 in base64): the result is a mail without
+    headers whose body is the base64 text, written back with an extra blank line. Such a part gets
+    its encoded body back as payload, so it is written byte for byte and decodes to the file."""
+    msg = email.message_from_bytes(raw)
+    for part in leaf_parts(msg):
+        payload = part.get_payload()
+        cte = str(part.get("Content-Transfer-Encoding") or "").strip().lower()
+        if (part.get_content_maintype() == "message" and cte in ("base64", "quoted-printable")
+                and isinstance(payload, list) and len(payload) == 1 and not payload[0].keys()
+                and isinstance(payload[0].get_payload(), str)):
+            part.set_payload(payload[0].get_payload())
+    return msg
+
+
+def content_id(part):
+    return str(part.get("Content-ID") or "").strip().strip("<>").strip()
 
 
 def assign_attachment_ids(msg):
     """Give every attachment part without a real Content-ID a unique `f_<10 hex>` id, in place.
-    Parts that already have one (inline images of a quoted reply) are left alone. Returns the count."""
-    fixed = 0
-    for part in leaf_parts(msg):
-        if part.get_content_disposition() != "attachment":
-            continue
-        if (part.get("Content-ID") or "").strip().strip("<>").strip():
+    Parts that already have one (inline images of a quoted reply, files of a forwarded Outlook mail)
+    are left alone. Returns {position in leaf_parts: id} for the parts it changed."""
+    leaves = leaf_parts(msg)
+    taken = {content_id(p) for p in leaves}
+    assigned = {}
+    for n, part in enumerate(leaves):
+        if part.get_content_disposition() != "attachment" or content_id(part):
             continue
         aid = "f_" + secrets.token_hex(5)
+        while aid in taken:
+            aid = "f_" + secrets.token_hex(5)
+        taken.add(aid)
         del part["X-Attachment-Id"]
         del part["Content-ID"]
         part["X-Attachment-Id"] = aid
@@ -190,38 +250,55 @@ def assign_attachment_ids(msg):
         fn = part.get_filename()
         if fn and fn.isascii() and not part.get_param("name"):
             part.set_param("name", fn)
-        fixed += 1
-    return fixed
+        assigned[n] = aid
+    return assigned
 
 
-def comparable(part):
-    """Decoded bytes of a part. Body text parts ignore line endings (Gmail turns CRLF into LF in
-    text parts on upload); attachments must stay byte-identical."""
+def part_bytes(part):
+    """Decoded content of a leaf part. Body text parts ignore line endings (Gmail turns CRLF into LF
+    in text parts on upload); attachments must stay byte-identical. A 7bit attached mail is compared
+    as written, without line endings either."""
+    payload = part.get_payload()
+    if isinstance(payload, list):
+        return b"".join(m.as_bytes(policy=GEN) for m in payload).replace(b"\r\n", b"\n")
     data = part.get_payload(decode=True) or b""
     if part.get_content_maintype() == "text" and part.get_content_disposition() != "attachment":
         data = data.replace(b"\r\n", b"\n")
     return data
 
 
-def compare_drafts(sent, back, thread, back_thread):
+def squash(value):
+    """A header value without its folding: Gmail may fold or unfold long headers."""
+    return " ".join(str(value or "").split())
+
+
+def compare_drafts(sent, back, thread, back_thread, assigned):
     """List what differs between the first draft (`sent`, as gws made it) and the new draft Gmail
-    stored (`back`). Only the attachment id headers may differ."""
+    stored (`back`). Only the ids the guard `assigned` may differ, and they must be there."""
     problems = []
-    if back_thread != thread:
+    # A reply must stay in its thread. A new message (+send) has no thread to keep: Gmail may file
+    # the re-created draft under a new thread id, which changes nothing for the recipient.
+    if (sent.get("In-Reply-To") or sent.get("References")) and back_thread != thread:
         problems.append("new draft is in another thread")
     a, b = leaf_parts(sent), leaf_parts(back)
     if [(p.get_content_type(), p.get_filename()) for p in a] != [(p.get_content_type(), p.get_filename()) for p in b]:
         problems.append("parts differ")
-    elif any(comparable(x) != comparable(y) for x, y in zip(a, b)):
-        problems.append("part content differs")
-    atts = [p for p in b if p.get_content_disposition() == "attachment"]
-    ids = [(p.get("Content-ID") or "").strip("<> ") for p in atts]
-    if not all(ids) or len(set(ids)) != len(ids):
-        problems.append("attachment ids empty or repeated: %s" % ids)
-    elif any((p.get("X-Attachment-Id") or "").strip() != i for p, i in zip(atts, ids)):
-        problems.append("X-Attachment-Id missing or different from Content-ID")
+    else:
+        if any(part_bytes(x) != part_bytes(y) for x, y in zip(a, b)):
+            problems.append("part content differs")
+        cids = [content_id(p) for p in b]
+        for n, aid in sorted(assigned.items()):
+            p = b[n]
+            name = p.get_filename() or "part %d" % n
+            if content_id(p) != aid or cids.count(aid) != 1:
+                problems.append("%s: Content-ID not kept or not unique" % name)
+            elif str(p.get("X-Attachment-Id") or "").strip() != aid:
+                problems.append("%s: X-Attachment-Id missing or different from Content-ID" % name)
+        empty = [p.get_filename() for p in b if p.get_content_disposition() == "attachment" and not content_id(p)]
+        if empty:
+            problems.append("attachments still without id: %s" % empty)
     for h in ("From", "To", "Cc", "Bcc", "Subject", "In-Reply-To", "References"):
-        if (sent.get(h) or "") != (back.get(h) or ""):
+        if squash(sent.get(h)) != squash(back.get(h)):
             problems.append("header %s changed" % h)
     return problems
 
@@ -231,7 +308,10 @@ def gws_json(args, cwd=None):
     i = r.stdout.find("{")
     if r.returncode != 0 or i < 0:
         raise RuntimeError("gws %s failed: %s" % (" ".join(args[:4]), (r.stderr or r.stdout)[-300:].strip()))
-    return json.JSONDecoder().raw_decode(r.stdout[i:])[0]
+    try:
+        return json.JSONDecoder().raw_decode(r.stdout[i:])[0]
+    except ValueError:
+        raise RuntimeError("gws %s gave unreadable output: %s" % (" ".join(args[:4]), r.stdout[i:i + 200]))
 
 
 def get_raw(message_id):
@@ -250,14 +330,14 @@ def fix_draft(draft):
     """Re-create `draft` with unique attachment ids. Returns (draft to report, number of parts fixed)."""
     old_id, thread = draft["id"], draft["message"]["threadId"]
     raw = get_raw(draft["message"]["id"])
-    first = email.message_from_bytes(raw)   # untouched copy, the reference for the checks
-    msg = email.message_from_bytes(raw)
-    fixed = assign_attachment_ids(msg)
-    if not fixed:
+    first = parse(raw)   # untouched copy, the reference for the checks
+    msg = parse(raw)
+    assigned = assign_attachment_ids(msg)
+    if not assigned:
         return draft, 0
     with tempfile.TemporaryDirectory() as tmp:  # gws --upload reads from the current directory only
         with open(os.path.join(tmp, "draft.eml"), "wb") as f:
-            f.write(msg.as_bytes())
+            f.write(msg.as_bytes(policy=GEN))
         try:
             new = gws_json(["gmail", "users", "drafts", "create", "--params", json.dumps({"userId": "me"}),
                             "--json", json.dumps({"message": {"threadId": thread}}),
@@ -268,8 +348,8 @@ def fix_draft(draft):
         raise RuntimeError("unexpected drafts.create answer, a second draft may exist in thread %s: %s"
                            % (thread, str(new)[:200]))
     try:
-        back = email.message_from_bytes(get_raw(new["message"]["id"]))
-        problems = compare_drafts(first, back, thread, new["message"].get("threadId"))
+        back = parse(get_raw(new["message"]["id"]))
+        problems = compare_drafts(first, back, thread, new["message"].get("threadId"), assigned)
     except Exception as exc:
         problems = ["read-back failed (%s)" % exc]
     if problems:
@@ -280,8 +360,8 @@ def fix_draft(draft):
         sys.stderr.write("gwsa: WARNING the first draft %s could not be deleted: 2 drafts exist, delete %s "
                          "by hand (the new draft %s is the fixed one)\n" % (old_id, old_id, new["id"]))
     sys.stderr.write("gwsa: %d attachment(s) given unique Content-IDs; draft %s replaced by %s "
-                     "(same thread, checked)\n" % (fixed, old_id, new["id"]))
-    return new, fixed
+                     "(checked)\n" % (len(assigned), old_id, new["id"]))
+    return new, len(assigned)
 
 
 def run_draft_with_attachments(argv):
@@ -293,17 +373,20 @@ def run_draft_with_attachments(argv):
     if r.returncode != 0:
         sys.stdout.write(out)
         return r.returncode
+    draft_id = None
     try:
         i = out.find("{")
-        draft = json.JSONDecoder().raw_decode(out[i:])[0]
+        draft = json.JSONDecoder().raw_decode(out[i:])[0] if i >= 0 else {}
         if "id" not in draft or "message" not in draft:
             raise RuntimeError("no draft id in gws output")
+        draft_id = draft["id"]
         new, fixed = fix_draft(draft)
         sys.stdout.write(json.dumps(new, indent=2) + "\n" if fixed else out)
     except Exception as exc:
-        sys.stderr.write("gwsa: WARNING attachment-id fix failed (%s). The draft is kept as gws made it: its "
-                         "attachments may share an empty Content-ID and show as 1 file in Outlook or "
-                         "Apple Mail.\n" % exc)
+        sys.stderr.write("gwsa: WARNING attachment-id fix failed (%s). The draft%s is kept as gws made it: its "
+                         "attachments may share an empty Content-ID and show as 1 file in Outlook or Apple Mail. "
+                         "Do not re-run the same command: it fails the same way and leaves a second draft.\n"
+                         % (exc, " %s" % draft_id if draft_id else ""))
         sys.stdout.write(out)
     return 0
 
@@ -311,6 +394,13 @@ def run_draft_with_attachments(argv):
 # ---------- entry point ----------
 
 def main(argv):
+    if sys.version_info < (3, 7):
+        sys.stderr.write("gwsa: Gmail guard skipped (it needs Python 3.7+, this is %s)\n" % sys.version.split()[0])
+        os.execvp("gws", ["gws"] + argv)
+    # The attachment step runs gws from a temporary directory: a relative profile path must not move.
+    cfg = os.environ.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")
+    if cfg:
+        os.environ["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = os.path.abspath(cfg)
     try:
         if os.environ.get("GWSA_ALLOW_PLAIN") != "1" and len(argv) >= 2 and argv[0] == "gmail":
             if argv[1] in HELPERS:
@@ -323,7 +413,7 @@ def main(argv):
         sys.stderr.write("gwsa: html guard skipped (%s)\n" % exc)
         argv = sys.argv[1:]
     if (len(argv) >= 2 and argv[0] == "gmail" and argv[1] in HELPERS and "--draft" in argv
-            and "--dry-run" not in argv and has_attachments(argv)
+            and not {"--dry-run", "--help", "-h"} & set(argv) and adds_attachments(argv)
             and os.environ.get("GWSA_KEEP_ATTACHMENT_IDS") != "1"):
         sys.exit(run_draft_with_attachments(argv))
     os.execvp("gws", ["gws"] + argv)

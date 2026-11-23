@@ -95,6 +95,20 @@ install -m 0755 "$SCRIPT_DIR/gwsa" "$BIN_DIR/gwsa"
 echo "==> installed: $BIN_DIR/gwsa"
 install -m 0755 "$SCRIPT_DIR/gwsa-gmail-guard.py" "$BIN_DIR/gwsa-gmail-guard.py"
 echo "==> installed: $BIN_DIR/gwsa-gmail-guard.py (Gmail draft guard, called by gwsa)"
+# The guard needs Python 3 (standard library only); gwsa looks for one at each call. Without one,
+# gwsa still works but drafts are not fixed. If uv is here, install a uv-managed Python. Trusting
+# the system certificate store lets a TLS-intercepting proxy work; older uv calls it --native-tls.
+if ! "$BIN_DIR/gwsa" guard >/dev/null 2>&1 && command -v uv >/dev/null 2>&1; then
+  echo "==> no usable Python 3 for the Gmail guard: installing one with uv"
+  if uv python install --help | grep -q -- '--system-certs'; then CERTS_FLAG=--system-certs; else CERTS_FLAG=--native-tls; fi
+  uv python install "$CERTS_FLAG" || echo "WARNING: uv python install failed"
+fi
+if guard_state="$("$BIN_DIR/gwsa" guard)"; then
+  echo "==> $guard_state"
+else
+  echo "WARNING: $guard_state"
+  echo "         gwsa still works, but Gmail drafts are not fixed (see SKILL.md, 'Gmail drafts')."
+fi
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) echo "WARNING: $BIN_DIR is not on your PATH — add it in your shell profile." ;;

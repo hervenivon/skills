@@ -111,6 +111,17 @@ Research log behind the `gws-multi-account` skill. Verified on macOS with `gws 0
   with the same `threadId` (raw upload, `--upload <file> --upload-content-type message/rfc822`,
   from the current directory), check it, then delete the old one. On upload Gmail turns CRLF into
   LF inside text parts, so compare text parts without line endings and attachments byte for byte.
+- **Which drafts hold files:** `-a/--attach` in every form clap accepts (`-a f`, `-a=f`, `-af`,
+  `--attach f`, `--attach=f`), and `+forward`, which keeps the original's files by default
+  (`--no-original-attachments` drops them). Files of a forwarded Outlook or Apple Mail message may
+  already carry a `Content-ID` without `X-Attachment-Id`.
+- **Attached `.eml`:** gws types it `message/rfc822` (mime_guess) and encodes it in base64 like
+  every attachment. Python's `email` still parses such a body as a nested mail (a headerless one
+  holding the base64 text) and writes it back with an extra blank line.
+- **Writing a message back with Python:** the default `compat32` generator re-folds every header
+  over 78 characters (To/Cc with several addresses, a long Subject, References in a thread). Use
+  `compat32.clone(max_line_length=None, linesep="\r\n")` to write headers as they came, and compare
+  header values with whitespace collapsed, since Gmail may fold them on its side.
 - Both are worked around by `scripts/gwsa-gmail-guard.py` (see the skill's "Gmail drafts" section).
 
 ## Login scopes: what `-s` really does (verified in source + live)
