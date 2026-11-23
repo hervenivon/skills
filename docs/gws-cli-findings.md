@@ -93,6 +93,37 @@ Research log behind the `gws-multi-account` skill. Verified on macOS with `gws 0
 - The alias must already exist in Gmail (Settings → Accounts → "Send mail as"); verify with:
   `gws gmail users settings sendAs list --params '{"userId":"me"}'`.
 
+## Gmail helper drafts sent from the Gmail UI (gws 0.22.5, verified Nov 2026)
+
+- **Plain-text drafts get hard-wrapped.** A draft created without `--html` holds only text/plain.
+  Gmail opens it in plain-text compose mode and, when it is sent from the UI, hard-wraps every line
+  at about 70 characters and sends text/plain only (`>` quote block). gws itself keeps long lines,
+  and direct API sends are not re-wrapped, so the problem only shows after a human presses Send.
+  A draft created with `--html` keeps its lines intact when it is sent from the Gmail UI.
+- **Attachments lose their identity.** Helper drafts with `-a/--attach` carry attachment parts
+  without `X-Attachment-Id` or `Content-ID`. Sent from the Gmail UI, every attachment then leaves
+  with an empty `X-Attachment-Id:` and the same empty `Content-ID: <>`. Outlook showed only the
+  first of 2 PDFs; Apple Mail showed a PDF + a Word as "2 identical Word files" (and forwarded only
+  the Word back). Gmail web composes attachments with a unique `f_<10 hex>` id in both headers.
+  Related upstream: [googleworkspace/cli#988](https://github.com/googleworkspace/cli/issues/988)
+  reports a missing `X-Attachment-Id` on the inline images of a quoted reply.
+- **Fixing a reply draft:** `drafts update` drops a reply draft from its thread. Create a new draft
+  with the same `threadId` (raw upload, `--upload <file> --upload-content-type message/rfc822`,
+  from the current directory), check it, then delete the old one. On upload Gmail turns CRLF into
+  LF inside text parts, so compare text parts without line endings and attachments byte for byte.
+- **Which drafts hold files:** `-a/--attach` in every form clap accepts (`-a f`, `-a=f`, `-af`,
+  `--attach f`, `--attach=f`), and `+forward`, which keeps the original's files by default
+  (`--no-original-attachments` drops them). Files of a forwarded Outlook or Apple Mail message may
+  already carry a `Content-ID` without `X-Attachment-Id`.
+- **Attached `.eml`:** gws types it `message/rfc822` (mime_guess) and encodes it in base64 like
+  every attachment. Python's `email` still parses such a body as a nested mail (a headerless one
+  holding the base64 text) and writes it back with an extra blank line.
+- **Writing a message back with Python:** the default `compat32` generator re-folds every header
+  over 78 characters (To/Cc with several addresses, a long Subject, References in a thread). Use
+  `compat32.clone(max_line_length=None, linesep="\r\n")` to write headers as they came, and compare
+  header values with whitespace collapsed, since Gmail may fold them on its side.
+- Both are worked around by `scripts/gwsa-gmail-guard.py` (see the skill's "Gmail drafts" section).
+
 ## Login scopes: what `-s` really does (verified in source + live)
 
 - `gws auth login` has three scope modes ([`auth_commands.rs`](https://github.com/googleworkspace/cli/blob/main/crates/google-workspace-cli/src/auth_commands.rs)):

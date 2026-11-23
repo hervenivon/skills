@@ -8,6 +8,7 @@
 #
 # Usage:
 #   gwsa list                          # show profiles and their auth state
+#   gwsa guard                         # is the Gmail draft guard on, and which Python runs it
 #   gwsa <profile> <gws args...>       # run any gws command as that account
 #
 # Examples:
@@ -18,9 +19,50 @@
 set -euo pipefail
 
 ROOT="${GWSA_ROOT:-$HOME/.config/gws-accounts}"
+# Absolute, because the Gmail guard runs some gws calls from a temporary directory.
+[[ "$ROOT" == /* ]] || ROOT="$PWD/$ROOT"
+
+# The Gmail guard is installed next to the real file of this script: follow symlinks to find it.
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+  link="$(readlink "$self")"
+  if [[ "$link" == /* ]]; then self="$link"; else self="$(dirname "$self")/$link"; fi
+done
+GUARD="$(cd "$(dirname "$self")" && pwd)/gwsa-gmail-guard.py"
+
+# Python 3 to run the guard (standard library only), in this order: $GWSA_PYTHON; python3 on PATH;
+# a uv-managed Python (`uv python find` never downloads). On macOS without the developer tools,
+# /usr/bin/python3 is only a stub that opens an install dialog and fails: it is skipped.
+# Sets GUARD_PY, or GUARD_WHY when the guard cannot run.
+find_guard_python() {
+  GUARD_PY="" GUARD_WHY=""
+  if [[ ! -f "$GUARD" ]]; then
+    GUARD_WHY="$GUARD is missing, re-run bootstrap.sh"
+    return 1
+  fi
+  if [[ -n "${GWSA_PYTHON:-}" ]]; then
+    GUARD_PY="$GWSA_PYTHON"
+    return 0
+  fi
+  local py dev
+  if py="$(command -v python3)"; then
+    if [[ "$py" != /usr/bin/python3 || "$(uname -s)" != Darwin ]] ||
+       { dev="$(xcode-select -p 2>/dev/null)" && [[ -d "$dev" ]]; }; then
+      GUARD_PY="$py"
+      return 0
+    fi
+  fi
+  if command -v uv >/dev/null 2>&1 &&
+     py="$(uv python find --python-preference only-managed '>=3.7' 2>/dev/null)" && [[ -n "$py" ]]; then
+    GUARD_PY="$py"
+    return 0
+  fi
+  GUARD_WHY="no usable Python 3: run 'uv python install', 'xcode-select --install' or 'brew install python'"
+  return 1
+}
 
 usage() {
-  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
   if [[ -d "$ROOT" ]]; then
     echo
     echo "Profiles in $ROOT:"
@@ -35,6 +77,14 @@ case "$cmd" in
   ""|-h|--help|help)
     usage
     exit 0
+    ;;
+  guard)
+    if find_guard_python; then
+      echo "Gmail guard: on ($GUARD, run by $GUARD_PY)"
+      exit 0
+    fi
+    echo "Gmail guard: OFF ($GUARD_WHY)"
+    exit 1
     ;;
   list)
     printf '%-12s %-10s %-12s %s\n' "PROFILE" "AUTH" "CREDENTIALS" "CLIENT_SECRET"
@@ -70,5 +120,27 @@ fi
 export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$dir"
 # 'file' keeps the encryption key inside the profile dir => portable across machines.
 export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND="${GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND:-file}"
+
+# Gmail guard: every `gmail` command goes through gwsa-gmail-guard.py (installed next to this
+# wrapper), which fixes 2 problems of helper drafts before or after running gws:
+#  - plain-text drafts are hard-wrapped at ~70 characters when sent from the Gmail UI: their body is
+#    converted to HTML (opt out for 1 call: GWSA_ALLOW_PLAIN=1);
+#  - attachments of a draft leave with the same empty Content-ID, so Outlook / Apple Mail show 1 file:
+#    each attachment gets its own id (opt out for 1 call: GWSA_KEEP_ATTACHMENT_IDS=1).
+# Check its state with: gwsa guard.
+if [[ "${1:-}" == "gmail" ]]; then
+  if find_guard_python; then
+    exec "$GUARD_PY" "$GUARD" "$@"
+  fi
+  for arg in "$@"; do
+    case "$arg" in
+      --draft|drafts|users.drafts.*)
+        echo "gwsa: WARNING Gmail guard not run ($GUARD_WHY). This draft may be hard-wrapped, or show" \
+             "1 attachment out of several, once it is sent from the Gmail UI." >&2
+        break
+        ;;
+    esac
+  done
+fi
 
 exec gws "$@"
